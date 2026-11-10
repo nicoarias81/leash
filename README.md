@@ -15,7 +15,7 @@ OWASP category, with the evidence attached to every claim.
 
 | OWASP | Tool | What you get |
 |---|---|---|
-| **A01** Broken Access Control | `leash_login` + `leash_replay` | The plugin signs in two identities (e.g. `userA`, `userB`) and keeps their sessions **inside the plugin** — tokens never enter the model context. It replays the same request as both and diffs status/size/hash. Byte-identical responses for different identities = access-control failure, measured, not guessed. |
+| **A01** Broken Access Control | `leash_login` + `leash_replay` | The plugin signs in two identities (e.g. `userA`, `userB`) and keeps their sessions **inside the plugin** — tokens never enter the model context. It replays the same request as both and diffs status/size/hash, plus **canary detection**: give each identity a marker unique to them (their email, a user id, an object id) and the plugin flags any marker that crosses into another identity's response — a verified leak on any API, not just a known lab. |
 | **A03** Injection | `leash_fuzz` | 2–10 crafted payloads for one parameter; the plugin sends each against a baseline and flags SQL errors in the response, unescaped reflection (XSS) and 5xx — with a per-variant verdict table. |
 | **A05** Security Misconfiguration | `leash_audit` | Deterministic header/cookie grade: CSP, HSTS, X-Frame-Options, MIME sniffing, CORS wildcard+credentials, cookie `HttpOnly`/`Secure`/`SameSite`. |
 | — surface discovery | `leash_crawl` | Same-origin crawl builds a persisted inventory of endpoints and forms; that inventory drives what to check next. |
@@ -54,8 +54,8 @@ scope file.
 - `leash_scan` — TCP recon of an in-scope host
 - `leash_crawl` — same-origin crawl → persisted endpoint/form inventory
 - `leash_login` — store an identity's session inside the plugin (out of context)
-- `leash_replay` — multi-identity replay with differential BOLA/IDOR verdict
-- `leash_fuzz` — parameter fuzzing with automatic SQL-error / reflection / 5xx flags
+- `leash_replay` — multi-identity replay with differential BOLA/IDOR verdict and canary-based leak detection
+- `leash_fuzz` — parameter fuzzing with baseline comparison, JSON/form body support, and automatic SQL-error / reflection / 5xx flags
 - `leash_audit` — security headers + cookie hygiene grade
 - `leash_request` — raw HTTP(S) probe of an in-scope host, logged to the ledger
 - `leash_scope` — show scope, mode and ledger stats

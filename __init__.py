@@ -259,7 +259,8 @@ def _tool_leash_fuzz(args, **kwargs):
         tls=bool(args.get("tls")), method=args.get("method", "GET"),
         path=args.get("path", "/search"), param=args.get("param", "q"),
         payloads=args.get("payloads"), use_body=bool(args.get("use_body")),
-        headers=args.get("headers"),
+        headers=args.get("headers"), baseline_value=args.get("baseline_value"),
+        body_format=args.get("body_format", "form"),
     )
     return json.dumps(out, ensure_ascii=False)
 
@@ -290,7 +291,9 @@ LEASH_FUZZ_SCHEMA = {
             "param": {"type": "string", "description": "Parameter name to inject into"},
             "payloads": {"type": "array", "items": {"type": "string"},
                          "description": "2-10 crafted payloads, e.g. [\"'\", \"<script>alert(1)</script>\", \"%2e%2e%2f%2e%2e%2f\" (encoded path traversal)]"},
-            "use_body": {"type": "boolean", "description": "Send as POST form body instead of query string"},
+            "use_body": {"type": "boolean", "description": "Send in the request body instead of the query string"},
+            "body_format": {"type": "string", "enum": ["form", "json"], "description": "Body encoding when use_body: form (urlencoded) or json"},
+            "baseline_value": {"type": "string", "description": "Known-benign value for the same parameter, so status/size deltas are meaningful (e.g. a valid coupon code)"},
             "headers": {"type": "object"},
         },
         "required": ["host", "param", "payloads"],
@@ -333,6 +336,7 @@ def _tool_leash_replay(args, **kwargs):
         tls=bool(args.get("tls")), method=args.get("method", "GET"),
         path=args.get("path", "/"), headers=args.get("headers"),
         identities=args.get("identities"), bodies=args.get("bodies"),
+        canaries=args.get("canaries"),
     )
     return json.dumps(out, ensure_ascii=False)
 
@@ -388,6 +392,7 @@ LEASH_REPLAY_SCHEMA = {
             "identities": {"type": "array", "items": {"type": "string"},
                            "description": "Identity names (default: all stored)"},
             "bodies": {"type": "object", "description": "Per-identity body, e.g. {\"userA\":\"uid=1\",\"userB\":\"uid=2\"}"},
+            "canaries": {"type": "object", "description": "Per-identity markers unique to that identity (their email, user id, or an object id only they own). If one identity's marker appears in another's response the leak is verified, e.g. {\"userA\":[\"a@corp.com\",\"order-101\"]}"},
         },
         "required": ["host"],
     },

@@ -269,6 +269,17 @@ def test_stateful_flow_login_replay_bola(scope_file, tmp_path, monkeypatch):
         r = engine.replay("127.0.0.1", port=port, path="/api/identity/1")
         assert "verdict" in r and "ACCESS-CONTROL FAILURE" in r["verdict"], r
         assert r["results"]["userA"]["body_sha1"] == r["results"]["userB"]["body_sha1"]
+
+        # canary detection: a marker unique to userA must not appear in userB's
+        # response on a scoped endpoint, and must flag on the leaky one
+        clean = engine.replay("127.0.0.1", port=port, path="/api/identity/2",
+                              canaries={"userA": ["alice@example.com"]})
+        assert not clean.get("leaks"), clean
+        leaky = engine.replay("127.0.0.1", port=port, path="/api/identity/1",
+                              canaries={"userA": ["alice@example.com"]})
+        assert leaky.get("leaks") and leaky["leaks"][0]["viewer"] == "userB", leaky
+        assert "CROSS-IDENTITY LEAK" in leaky["verdict"]
+
         f = store.add_finding("BOLA: any authenticated user reads /api/identity/<id>",
                               "high", "verified", evidence=r["verdict"] +
                               f" | userA sha={r['results']['userA']['body_sha1']}, userB sha={r['results']['userB']['body_sha1']}",

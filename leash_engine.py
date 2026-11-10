@@ -122,10 +122,12 @@ _MAX_VARIANTS = 20
 
 
 def fuzz(host, port=80, tls=False, method="GET", path="/search", param="q",
-         payloads=None, use_body=False, headers=None) -> dict:
+         payloads=None, use_body=False, headers=None, baseline_value=None,
+         body_format="form") -> dict:
     """Run payload variants against one parameter; detect reflection, SQL
     errors and error deltas vs a baseline. The model crafts payloads; the
-    plugin measures the responses."""
+    plugin measures the responses. Pass baseline_value with a known-benign
+    input so status/size deltas are meaningful."""
     ok, msg = _gate(host)
     if not ok:
         return {"blocked": True, "reason": msg}
@@ -137,16 +139,21 @@ def fuzz(host, port=80, tls=False, method="GET", path="/search", param="q",
 
     def send(value):
         if use_body:
-            body = f"{param}={quote(value)}"
+            if body_format == "json":
+                body = json.dumps({param: value})
+                ct = "application/json"
+            else:
+                body = f"{param}={quote(value)}"
+                ct = "application/x-www-form-urlencoded"
             spec = {"host": msg, "port": port, "tls": tls, "method": "POST", "path": path}
-            resp = _do_request(spec, base_headers | {"Content-Type": "application/x-www-form-urlencoded"}, body)
+            resp = _do_request(spec, base_headers | {"Content-Type": ct}, body)
         else:
             sep = "&" if "?" in path else "?"
             spec = {"host": msg, "port": port, "tls": tls, "method": method, "path": f"{path}{sep}{param}={quote(value)}"}
             resp = _do_request(spec, base_headers, "")
         return resp
 
-    base = send("leashbaseline9")
+    base = send(str(baseline_value) if baseline_value else "leashbaseline9")
     base_len = len(base["body"])
     variants = []
     for p in payloads:
@@ -161,7 +168,9 @@ def fuzz(host, port=80, tls=False, method="GET", path="/search", param="q",
             flags.append("payload REFLECTED unescaped — reflected-XSS candidate")
         if resp["status"] >= 500:
             flags.append(f"server error {resp['status']} on this payload")
-        if abs(len(resp["body"]) - base_len) > 200 and resp["status"] == base["status"]:
+        if resp["status"] != base["status"]:
+            flags.append(f"status change vs baseline ({base['status']} -> {resp['status']})")
+        if abs(len(resp["body"]) - base_len) > 200:
             flags.append(f"body size delta vs baseline ({base_len} -> {len(resp['body'])})")
         variants.append({"payload": p, "status": resp["status"], "len": len(resp["body"]),
                          "flags": flags})
@@ -271,7 +280,7 @@ def login(host, port=80, tls=False, method="POST", path="/login", headers=None,
             cookies.append(v.split(";")[0])
     bearer = ""
     try:
-        bearer = str(json.loads(resp["body"]).get(token_field, ""))[:400]
+        bearer = str(json.loads(resp["body"]).get(token_field, ""))[:4000]
     except (json.JSONDecodeError, AttributeError):
         pass
     if not cookies and not bearer:
@@ -289,8 +298,13 @@ def login(host, port=80, tls=False, method="POST", path="/login", headers=None,
 
 
 def replay(host, port=80, tls=False, method="GET", path="/", headers=None,
-           identities=None, bodies=None) -> dict:
-    """Replay one request as each stored identity and diff the responses."""
+           identities=None, bodies=None, canaries=None) -> dict:
+    """Replay one request as each stored identity and diff the responses.
+
+    canaries: {identity: [strings unique to that identity]} — e.g. their
+    email, user id or an object id only they own. If identity A's canary
+    shows up in identity B's response, data crosses the access-control
+    boundary: that is a verified leak, for any API, not just a known lab."""
     ok, msg = _gate(host)
     if not ok:
         return {"blocked": True, "reason": msg}
@@ -298,18 +312,20 @@ def replay(host, port=80, tls=False, method="GET", path="/", headers=None,
     wanted = identities or list(idents.keys())
     if len(wanted) < 2:
         return {"error": f"need 2+ stored identities for {msg}:{port}; use login() first (have: {list(idents)})"}
+    bodies_map = {str(k): str(v) for k, v in (bodies or {}).items()}
     results = {}
+    raw_bodies = {}
     for name in wanted[:4]:
         ident = idents.get(name)
         if not ident:
             results[name] = {"error": "unknown identity"}
             continue
-        body = (bodies or {}).get(name, "")
         t0 = time.monotonic()
         resp = _do_request({"host": msg, "port": port, "tls": tls, "method": method, "path": path},
                            _session_headers(ident) | {str(k): str(v) for k, v in (headers or {}).items()},
-                           body)
+                           bodies_map.get(name, ""))
         resp["time_ms"] = int((time.monotonic() - t0) * 1000)
+        raw_bodies[name] = resp["body"]
         results[name] = {
             "status": resp["status"], "body_len": len(resp["body"]),
             "body_sha1": hashlib.sha1(resp["body"].encode()).hexdigest()[:12],
@@ -317,17 +333,30 @@ def replay(host, port=80, tls=False, method="GET", path="/", headers=None,
         }
         _store.log_call("leash_replay", f"{method} {path} as {name}", str(resp["status"]), 0, "")
 
+    leaks = []
+    for owner, markers in (canaries or {}).items():
+        for marker in [str(m) for m in markers][:10]:
+            for viewer, rb in raw_bodies.items():
+                if viewer != owner and marker and marker in rb:
+                    leaks.append({"owner": owner, "viewer": viewer,
+                                  "marker_seen": marker[:80]})
     ok_names = [n for n, r in results.items() if r.get("status", 500) < 400]
     hashes = {results[n].get("body_sha1") for n in ok_names}
     verdict = None
-    if len(ok_names) >= 2 and len(hashes) == 1:
+    if leaks:
+        verdict = ("CROSS-IDENTITY LEAK: data owned by one identity appeared in "
+                   "another identity's response — broken object-level "
+                   "authorization, verified")
+    elif len(ok_names) >= 2 and len(hashes) == 1:
         verdict = ("ACCESS-CONTROL FAILURE candidate: different identities received "
                    "byte-identical responses — confirm the data should be shared")
     elif len(ok_names) >= 2:
-        verdict = ("responses differ per identity (expected for private data); "
-                   "compare body_len and status for leaks")
+        verdict = ("responses differ per identity and no canary crossed; "
+                   "no leak detected on this endpoint")
     _store.log_event("replay", "leash_replay", {msg}, set(), "", "enforce")
     out = {"target": f"{msg}:{port}", "request": f"{method} {path}", "results": results}
+    if leaks:
+        out["leaks"] = leaks
     if verdict:
         out["verdict"] = verdict
     return out

@@ -11,6 +11,12 @@ through recon, access-control testing, injection probes and a
 misconfiguration audit — then hands you a plain markdown report organized by
 OWASP category, with the evidence attached to every claim.
 
+**The table below is one example flow per category.** The tools are generic
+primitives, not a fixed scanner: the agent picks the endpoints, parameters,
+identities and payloads for *your* app — leash does the measuring, the
+differential testing and the evidence keeping. Nothing is hardcoded to any
+particular API; the demo hits a crAPI lab because it's a convenient target.
+
 ## What it checks
 
 | OWASP | Tool | What you get |

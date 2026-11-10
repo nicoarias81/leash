@@ -1,0 +1,28 @@
+name: leash
+version: 0.1.0
+description: Scope enforcement and evidence ledger for agent-driven security testing — blocks tool calls that reach outside the authorized target list
+author: nicoarias81
+license: MIT
+homepage: https://github.com/nicoarias81/leash
+requires_hermes: ">=0.21"
+provides_tools:
+  - leash_scope
+  - leash_finding
+  - leash_report
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+config_schema:
+  mode:
+    type: str
+    default: "audit"
+    description: "off | audit | enforce — enforce blocks out-of-scope network-capable tool calls"
+  scope_file:
+    type: str
+    default: ""
+    description: "Path to the JSON scope file (allowed hosts/CIDRs + authorization reference)"
+  monitored_tools:
+    type: list
+    default: ["terminal", "web_extract"]
+    description: "Tool names monitored by the scope gate (browser_* tools are always monitored)"
+tags: [security, pentest, guardrails]

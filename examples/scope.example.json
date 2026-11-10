@@ -1,0 +1,7 @@
+{
+  "target": "example target",
+  "authorization": "written authorization from the owner, date, reference",
+  "allowed_hosts": ["127.0.0.1", "localhost", "*.lab.local"],
+  "allowed_cidrs": ["192.168.10.0/24"],
+  "notes": "Copy, edit and point plugins.entries.leash.settings.scope_file at it. Enforce only after the user confirms the target list."
+}

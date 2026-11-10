@@ -70,6 +70,67 @@ def test_scope_load_errors(tmp_path):
         scope.load_scope(str(bad))
 
 
+def test_fuzz_and_audit(scope_file, tmp_path, monkeypatch):
+    """A03 fuzz flags SQL error + reflection; A05 audit catches headers/cookies."""
+    import http.server
+    import threading
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    scope.CURRENT["scope"] = scope.load_scope(scope_file)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/search"):
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+                if "'" in q:
+                    body = f"error: You have an error in your SQL syntax near '{q}'".encode()
+                    status = 500
+                elif "<script>" in q.lower():
+                    body = f"results for {q}".encode()  # reflected unescaped
+                    status = 200
+                else:
+                    body = b"no results"
+                    status = 200
+            else:
+                body = b"<html>home</html>"
+                status = 200
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Set-Cookie", "sid=abc123")  # no flags on purpose
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        fz = engine.fuzz("127.0.0.1", port=port, path="/search", param="q",
+                         payloads=["'", "<script>alert(1)</script>", "hello"])
+        assert fz["flagged"] == 2, fz
+        flags = " ".join(f for v in fz["variants"] for f in v["flags"])
+        assert "SQL-ERROR" in flags and "REFLECTED" in flags
+        aud = engine.headers_audit("127.0.0.1", port=port)
+        joined = "\n".join(aud["findings"])
+        assert "content-security-policy" in joined and "cookie 'sid'" in joined
+        assert aud["grade"] != "pass"
+    finally:
+        srv.shutdown()
+    scope.CURRENT["scope"] = None
+
+
+def test_owasp_normalization(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for raw, want in [("A01", "A01:2021 Broken Access Control"),
+                      ("a03:2021", "A03:2021 Injection"),
+                      ("custom thing", "custom thing")]:
+        assert store._norm_owasp(raw) == want
+
+
 def test_verified_finding_requires_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     out = store.add_finding("idor", "high", "verified", "", "")

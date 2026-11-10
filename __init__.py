@@ -138,6 +138,7 @@ def _tool_leash_finding(args, **kwargs):
         status=args.get("status", "hypothesis"),
         evidence=args.get("evidence", ""),
         source=args.get("source", ""),
+        owasp=args.get("owasp", ""),
     )
     return json.dumps(out, ensure_ascii=False)
 
@@ -175,6 +176,7 @@ LEASH_FINDING_SCHEMA = {
             "status": {"type": "string", "description": "hypothesis | verified"},
             "evidence": {"type": "string", "description": "Command + output excerpt proving the finding (required for verified)"},
             "source": {"type": "string", "description": "Tool/command that produced the evidence"},
+            "owasp": {"type": "string", "description": "OWASP category, e.g. 'A01' (Access Control), 'A03' (Injection), 'A05' (Misconfiguration)"},
         },
         "required": ["title", "severity", "status"],
     },
@@ -250,6 +252,69 @@ LEASH_REQUEST_SCHEMA = {
 
 
 # --- stateful testing tools ------------------------------------------------
+
+def _tool_leash_fuzz(args, **kwargs):
+    out = _engine.fuzz(
+        host=args.get("host", ""), port=args.get("port", 80),
+        tls=bool(args.get("tls")), method=args.get("method", "GET"),
+        path=args.get("path", "/search"), param=args.get("param", "q"),
+        payloads=args.get("payloads"), use_body=bool(args.get("use_body")),
+        headers=args.get("headers"),
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _tool_leash_audit(args, **kwargs):
+    out = _engine.headers_audit(
+        host=args.get("host", ""), port=args.get("port", 80),
+        tls=bool(args.get("tls")), path=args.get("path", "/"),
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+LEASH_FUZZ_SCHEMA = {
+    "name": "leash_fuzz",
+    "description": (
+        "OWASP A03 (Injection). Test one parameter with payload variants YOU "
+        "craft (2-10 strings: SQLi quotes, XSS probes, path traversal...). The "
+        "plugin sends each one, compares against a baseline request and flags "
+        "SQL errors, unescaped reflection (XSS) and 5xx — measured verdicts, "
+        "not guesses. Works on query params or form bodies (use_body)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string"}, "port": {"type": "integer"},
+            "tls": {"type": "boolean"}, "method": {"type": "string"},
+            "path": {"type": "string", "description": "Endpoint with the parameter, e.g. /search"},
+            "param": {"type": "string", "description": "Parameter name to inject into"},
+            "payloads": {"type": "array", "items": {"type": "string"},
+                         "description": "2-10 crafted payloads, e.g. [\"'\", \"<script>alert(1)</script>\", \"%2e%2e%2f%2e%2e%2f\" (encoded path traversal)]"},
+            "use_body": {"type": "boolean", "description": "Send as POST form body instead of query string"},
+            "headers": {"type": "object"},
+        },
+        "required": ["host", "param", "payloads"],
+    },
+}
+
+LEASH_AUDIT_SCHEMA = {
+    "name": "leash_audit",
+    "description": (
+        "OWASP A05 (Misconfiguration) + cookie hygiene. Fetch one in-scope page "
+        "and grade its security headers deterministically: CSP, HSTS, "
+        "X-Frame-Options, MIME sniffing, CORS wildcard+credentials, cookie "
+        "HttpOnly/Secure/SameSite. Run on every page that matters after crawl."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string"}, "port": {"type": "integer"},
+            "tls": {"type": "boolean"}, "path": {"type": "string"},
+        },
+        "required": ["host"],
+    },
+}
+
 
 def _tool_leash_login(args, **kwargs):
     out = _engine.login(
@@ -368,3 +433,7 @@ def register(ctx) -> None:
                       schema=LEASH_REPLAY_SCHEMA, handler=_tool_leash_replay)
     ctx.register_tool(name="leash_crawl", toolset="leash",
                       schema=LEASH_CRAWL_SCHEMA, handler=_tool_leash_crawl)
+    ctx.register_tool(name="leash_fuzz", toolset="leash",
+                      schema=LEASH_FUZZ_SCHEMA, handler=_tool_leash_fuzz)
+    ctx.register_tool(name="leash_audit", toolset="leash",
+                      schema=LEASH_AUDIT_SCHEMA, handler=_tool_leash_audit)

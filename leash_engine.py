@@ -111,7 +111,108 @@ def http_probe(host, port=80, tls=False, method="GET", path="/",
     return result
 
 
-# --- stateful testing: identities, replay, crawl ---------------------------
+# --- fuzzing: payload variants with automatic detection ---------------------
+
+_SQL_ERRORS = [
+    "you have an error in your sql syntax", "unclosed quotation mark",
+    "sqlite3.", "sqlstate", "ora-", "psql:", "warning: mysql",
+    "unterminated string", "syntax error at or near",
+]
+_MAX_VARIANTS = 20
+
+
+def fuzz(host, port=80, tls=False, method="GET", path="/search", param="q",
+         payloads=None, use_body=False, headers=None) -> dict:
+    """Run payload variants against one parameter; detect reflection, SQL
+    errors and error deltas vs a baseline. The model crafts payloads; the
+    plugin measures the responses."""
+    ok, msg = _gate(host)
+    if not ok:
+        return {"blocked": True, "reason": msg}
+    from urllib.parse import quote
+    payloads = [str(p)[:500] for p in (payloads or [])][:_MAX_VARIANTS]
+    if not payloads:
+        return {"error": "no payloads given — craft 2-10 candidate payloads and pass them in 'payloads'"}
+    base_headers = {str(k): str(v) for k, v in (headers or {}).items()}
+
+    def send(value):
+        if use_body:
+            body = f"{param}={quote(value)}"
+            spec = {"host": msg, "port": port, "tls": tls, "method": "POST", "path": path}
+            resp = _do_request(spec, base_headers | {"Content-Type": "application/x-www-form-urlencoded"}, body)
+        else:
+            sep = "&" if "?" in path else "?"
+            spec = {"host": msg, "port": port, "tls": tls, "method": method, "path": f"{path}{sep}{param}={quote(value)}"}
+            resp = _do_request(spec, base_headers, "")
+        return resp
+
+    base = send("leashbaseline9")
+    base_len = len(base["body"])
+    variants = []
+    for p in payloads:
+        resp = send(p)
+        low = resp["body"].lower()
+        sql_err = any(sig in low for sig in _SQL_ERRORS)
+        reflected = p in resp["body"] or quote(p) in resp["body"]
+        flags = []
+        if sql_err:
+            flags.append("SQL-ERROR in response — error-based injection candidate")
+        if reflected:
+            flags.append("payload REFLECTED unescaped — reflected-XSS candidate")
+        if resp["status"] >= 500:
+            flags.append(f"server error {resp['status']} on this payload")
+        if abs(len(resp["body"]) - base_len) > 200 and resp["status"] == base["status"]:
+            flags.append(f"body size delta vs baseline ({base_len} -> {len(resp['body'])})")
+        variants.append({"payload": p, "status": resp["status"], "len": len(resp["body"]),
+                         "flags": flags})
+        _store.log_call("leash_fuzz", f"{method} {path} [{param}={p[:80]}]", str(resp["status"]), 0, "")
+    hits = sum(1 for v in variants if v["flags"])
+    _store.log_event("fuzz", "leash_fuzz", {msg}, set(), "", "enforce")
+    out = {"target": f"{msg}:{port}", "endpoint": path, "param": param,
+           "baseline": {"status": base["status"], "len": base_len},
+           "variants": variants, "flagged": hits}
+    if hits:
+        out["verdict"] = (f"{hits}/{len(variants)} payloads triggered flags — "
+                          "inspect flagged variants and verify manually before recording a finding")
+    return out
+
+
+# --- hardening audit: response security headers + cookie flags --------------
+
+def headers_audit(host, port=80, tls=False, path="/") -> dict:
+    """Fetch one in-scope URL and grade its security headers deterministically."""
+    ok, msg = _gate(host)
+    if not ok:
+        return {"blocked": True, "reason": msg}
+    resp = _do_request({"host": msg, "port": port, "tls": tls, "method": "GET", "path": path})
+    hdrs = {k.lower(): v for k, v in resp["headers"].items()}
+    findings = []
+
+    def missing(name, why):
+        if name not in hdrs:
+            findings.append(f"missing {name}: {why}")
+
+    missing("content-security-policy", "no CSP — injected scripts run unrestricted")
+    missing("x-content-type-options", "MIME sniffing allowed")
+    if tls:
+        missing("strict-transport-security", "no HSTS on TLS site")
+    if "x-frame-options" not in hdrs and "frame-ancestors" not in hdrs.get("content-security-policy", ""):
+        findings.append("no X-Frame-Options / frame-ancestors — clickjacking possible")
+    aco = hdrs.get("access-control-allow-origin", "")
+    if aco == "*" and hdrs.get("access-control-allow-credentials", "").lower() == "true":
+        findings.append("CORS: wildcard origin WITH credentials — any site can read authenticated responses")
+    for raw in (v for k, v in resp["headers"].items() if k.lower() == "set-cookie"):
+        low = raw.lower()
+        name = raw.split("=")[0]
+        gaps = [f for f in ("httponly", "secure", "samesite") if f not in low]
+        if gaps:
+            findings.append(f"cookie '{name}' without {', '.join(gaps)}")
+    _store.log_call("leash_audit", f"GET {path}", str(resp["status"]), 0, "")
+    return {"target": f"{msg}:{port}", "path": path, "status": resp["status"],
+            "headers": {k.lower(): v for k, v in resp["headers"].items() if k.lower() != "set-cookie"},
+            "findings": findings,
+            "grade": "pass" if not findings else f"{len(findings)} issue(s)"}
+
 
 def _identities_path() -> str:
     return os.path.join(_store.data_dir(), "identities.json")

@@ -14,6 +14,8 @@ provides_tools:
   - leash_login
   - leash_replay
   - leash_crawl
+  - leash_fuzz
+  - leash_audit
 provides_hooks:
   - pre_tool_call
   - post_tool_call

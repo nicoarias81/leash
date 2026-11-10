@@ -1,62 +1,83 @@
 # leash
 
-Scope enforcement and evidence ledger for agent-driven security testing in
-[Hermes Agent](https://github.com/NousResearch/hermes-agent).
+OWASP Top 10 checks for the web apps you build with
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) — run by the
+agent, against your own dev server, with a hard scope gate around every
+network action.
 
-A pentest agent is dangerous precisely because it is good at its job: nothing
-stops a `curl` or an `nmap` aimed at a host the user never authorized. leash
-constrains that with a hard gate and keeps the evidence that proves each
-finding.
+You just finished your webapp. You don't know security, and you don't need to:
+ask Hermes *"check my app against the OWASP Top 10"* and leash walks it
+through recon, access-control testing, injection probes and a
+misconfiguration audit — then hands you a plain markdown report organized by
+OWASP category, with the evidence attached to every claim.
 
-## What it does
+## What it checks
 
-leash is a **pentest toolkit**: it gives the agent the primitives to actually
-run an authorized security test — recon, session-aware access-control
-testing, findings, report — with a hard scope gate around every network
-action. The primitives hold state between calls, which is what a prompt or a
-skill cannot do.
+| OWASP | Tool | What you get |
+|---|---|---|
+| **A01** Broken Access Control | `leash_login` + `leash_replay` | The plugin signs in two identities (e.g. `userA`, `userB`) and keeps their sessions **inside the plugin** — tokens never enter the model context. It replays the same request as both and diffs status/size/hash. Byte-identical responses for different identities = access-control failure, measured, not guessed. |
+| **A03** Injection | `leash_fuzz` | 2–10 crafted payloads for one parameter; the plugin sends each against a baseline and flags SQL errors in the response, unescaped reflection (XSS) and 5xx — with a per-variant verdict table. |
+| **A05** Security Misconfiguration | `leash_audit` | Deterministic header/cookie grade: CSP, HSTS, X-Frame-Options, MIME sniffing, CORS wildcard+credentials, cookie `HttpOnly`/`Secure`/`SameSite`. |
+| — surface discovery | `leash_crawl` | Same-origin crawl builds a persisted inventory of endpoints and forms; that inventory drives what to check next. |
+| — recon | `leash_scan` | TCP port scan of an in-scope host before touching HTTP. |
 
-- **Engine tools**:
-  - `leash_scan` — TCP port scan of an in-scope host (common-services list or
-    custom ports).
-  - `leash_crawl` — same-origin BFS crawl; maps endpoints and forms into a
-    persisted inventory that survives across sessions.
-  - `leash_login` — authenticate an *identity* (user/admin/victim) and keep
-    its cookies/bearer inside the plugin. The token never enters the model
-    context, so it cannot leak into logs, transcripts or other tools' output.
-  - `leash_replay` — replay the same request as 2+ stored identities and diff
-    status/size/hash/timing. Byte-identical responses for different
-    identities are flagged as an access-control failure (BOLA/IDOR) — the
-    differential proof, computed by the plugin, not the model.
-  - `leash_request` — one raw HTTP(S) request for anything the higher-level
-    tools don't cover.
-- **Scope gate** (`pre_tool_call` + inside every engine tool): arguments of
-  monitored tools (`terminal`, `web_extract`, `browser_*`) are scanned for
-  network targets; the engine tools additionally re-check the scope on every
-  call, resolving hostnames so an approved name can't hide an out-of-scope IP.
-  In `enforce` mode anything outside the scope file is **blocked** before it
-  runs. With no usable scope file, the engine fails closed.
-- **Evidence ledger** (`post_tool_call`): every monitored call is appended to a
-  local JSONL ledger — what ran, on what, with what status.
-- **Findings**: `leash_finding` records a finding; status `verified` is
-  refused unless the evidence excerpt is present. Hypotheses stay labelled as
-  hypotheses.
-- **Report**: `leash_report` writes a markdown report — scope, activity,
-  blocked attempts, findings with evidence.
+Every verdict is computed by the plugin from actual responses — the model
+doesn't eyeball curl output. Every claim in the report traces to a ledger
+entry.
 
-## Scope file
+## Scope gate
+
+All of this is network-active, so leash is fail-closed:
+
+- The agent loads a scope file (`leash_scope` / config) describing exactly
+  what you authorized — your dev server, a lab CIDR.
+- Engine tools re-check the scope on **every** call and resolve DNS first, so
+  an approved hostname can't point at an out-of-scope IP.
+- `pre_tool_call` also scans arguments of monitored tools (`terminal`,
+  `browser_*`, …) and blocks out-of-scope network calls in `enforce` mode.
+- No scope file → every engine tool refuses to run.
 
 ```json
 {
-  "target": "crAPI lab",
-  "authorization": "local lab, owned by me",
+  "target": "my dev server",
+  "authorization": "localhost, owned by me",
   "allowed_hosts": ["127.0.0.1", "localhost"],
   "allowed_cidrs": ["192.168.10.0/24"]
 }
 ```
 
-Wildcards (`*.lab.local`) are supported. DNS is never resolved; matching is
-literal.
+Wildcards (`*.lab.local`) are supported; matching is literal against the
+scope file.
+
+## Tools
+
+- `leash_scan` — TCP recon of an in-scope host
+- `leash_crawl` — same-origin crawl → persisted endpoint/form inventory
+- `leash_login` — store an identity's session inside the plugin (out of context)
+- `leash_replay` — multi-identity replay with differential BOLA/IDOR verdict
+- `leash_fuzz` — parameter fuzzing with automatic SQL-error / reflection / 5xx flags
+- `leash_audit` — security headers + cookie hygiene grade
+- `leash_request` — raw HTTP(S) probe of an in-scope host, logged to the ledger
+- `leash_scope` — show scope, mode and ledger stats
+- `leash_finding` — record a finding (`hypothesis` | `verified` + evidence, OWASP category)
+- `leash_report` — write the markdown report, grouped by OWASP category
+
+## Example
+
+```
+» check my app on localhost:8000 against the OWASP top 10
+
+agent: scope loaded (localhost, 192.168.10.0/24) — enforce mode
+       leash_scan  → :8000 open
+       leash_crawl → 12 endpoints, 3 forms
+       leash_audit → 6 misconfigurations (no CSP, session cookie without flags)
+       leash_login → two test identities signed in
+       leash_replay→ GET /api/identity/1: identical response as userA and userB
+                     → A01 Broken Access Control (verified)
+       leash_fuzz  → /search?q=' → SQL error signature
+                     → A03 Injection (candidate → verified)
+       leash_report→ report.md, grouped by OWASP category
+```
 
 ## Configuration
 
@@ -67,17 +88,6 @@ literal.
 | `mode` | `audit` | `off` / `audit` / `enforce` |
 | `scope_file` | *(empty)* | Path to the scope JSON |
 | `monitored_tools` | `["terminal", "web_extract"]` | Tool names monitored (`browser_*` always monitored) |
-
-## Tools
-
-- `leash_scan` — TCP recon of an in-scope host
-- `leash_crawl` — same-origin crawl → persisted endpoint/form inventory
-- `leash_login` — store an identity's session inside the plugin (out of context)
-- `leash_replay` — multi-identity replay with differential BOLA/IDOR verdict
-- `leash_request` — raw HTTP(S) probe of an in-scope host, logged to the ledger
-- `leash_scope` — show scope, mode and ledger stats
-- `leash_finding` — record a finding (`hypothesis` | `verified` + evidence)
-- `leash_report` — write the markdown report
 
 ## Disclosure
 

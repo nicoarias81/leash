@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 try:
@@ -47,13 +48,38 @@ def log_event(kind, tool, targets, bad, session, mode) -> None:
     })
 
 
-def add_finding(title, severity, status, evidence, source) -> dict:
+OWASP_CATEGORIES = {
+    "a01": "A01:2021 Broken Access Control",
+    "a02": "A02:2021 Cryptographic Failures",
+    "a03": "A03:2021 Injection",
+    "a04": "A04:2021 Insecure Design",
+    "a05": "A05:2021 Security Misconfiguration",
+    "a06": "A06:2021 Vulnerable and Outdated Components",
+    "a07": "A07:2021 Identification and Authentication Failures",
+    "a08": "A08:2021 Software and Data Integrity Failures",
+    "a09": "A09:2021 Security Logging and Monitoring Failures",
+    "a10": "A10:2021 Server-Side Request Forgery (SSRF)",
+}
+
+
+def _norm_owasp(value) -> str:
+    v = str(value or "").strip()
+    if not v:
+        return ""
+    m = re.match(r"(?i)^(a\d{2})\b", v)
+    if m:
+        return OWASP_CATEGORIES.get(m.group(1).lower(), v)
+    return v
+
+
+def add_finding(title, severity, status, evidence, source, owasp="") -> dict:
     if status == "verified" and not (evidence or "").strip():
         return {"error": "a verified finding requires evidence: paste the command/output that proves it, or record it as hypothesis"}
     rec = {
         "ts": _now(), "title": str(title)[:300],
         "severity": str(severity).lower(), "status": str(status).lower(),
         "evidence": str(evidence or "")[:MAX_EXCERPT], "source": str(source or ""),
+        "owasp": _norm_owasp(owasp),
     }
     _append("findings.jsonl", rec)
     return {"ok": True, "finding": rec}
@@ -80,11 +106,13 @@ def stats() -> dict:
                     hosts.add(t)
     findings = 0
     fpath = os.path.join(data_dir(), "findings.jsonl")
+    frows = []
     if os.path.isfile(fpath):
         with open(fpath, "r", encoding="utf-8") as fh:
-            findings = sum(1 for line in fh if line.strip())
+            frows = [json.loads(line) for line in fh if line.strip()]
+        findings = len(frows)
     return {"calls": calls, "blocks": blocks, "audit_violations": violations,
-            "findings": findings, "hosts_seen": sorted(hosts)}
+            "findings": findings, "hosts_seen": sorted(hosts), "finding_rows": frows}
 
 
 def write_report(scope_summary: str, scope_error: str) -> str:
@@ -102,13 +130,20 @@ def write_report(scope_summary: str, scope_error: str) -> str:
         "", "## Findings", "",
     ]
     fpath = os.path.join(data_dir(), "findings.jsonl")
+    frows = []
     if os.path.isfile(fpath):
         with open(fpath, "r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    f = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            frows = [json.loads(line) for line in fh if line.strip()]
+    if not frows:
+        lines.append("_No findings recorded._")
+    else:
+        by_owasp = {}
+        for f in frows:
+            by_owasp.setdefault(f.get("owasp") or "Uncategorized", []).append(f)
+        for cat in sorted(by_owasp):
+            lines.append(f"## {cat}")
+            lines.append("")
+            for f in by_owasp[cat]:
                 lines.append(f"### [{f['severity']}] {f['title']} — {f['status']}")
                 lines.append(f"- Time: {f['ts']}")
                 if f.get("source"):
@@ -116,8 +151,6 @@ def write_report(scope_summary: str, scope_error: str) -> str:
                 if f.get("evidence"):
                     lines.append(f"- Evidence:\n  ```\n  {f['evidence']}\n  ```")
                 lines.append("")
-    else:
-        lines.append("_No findings recorded._")
     out = os.path.join(data_dir(), "report.md")
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))

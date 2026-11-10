@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 
@@ -100,18 +101,46 @@ def test_engine_scans_and_probes_local_server(scope_file, tmp_path, monkeypatch)
     scope.CURRENT["scope"] = scope.load_scope(scope_file)
 
     class H(http.server.BaseHTTPRequestHandler):
-        def _respond(self, status):
-            body = b'{"user": 2, "email": "victim@example.com"}'
-            self.send_response(status)
+        def do_GET(self):
+            if self.path == "/api/identity/1":
+                body = b'{"id": 1, "email": "alice@example.com"}'
+                self.send_response(200)
+            elif self.path == "/api/identity/2":
+                body = b'{"id": 2, "email": "victim@example.com"}'
+                self.send_response(200)
+            elif self.path == "/":
+                body = b'<html><a href="/page2">p2</a><a href="https://evil.example.com/x">bad</a><form action="/login"><input type="text" name="user"></form></html>'
+                self.send_response(200)
+            elif self.path == "/page2":
+                body = b'<html><a href="/page3">p3</a></html>'
+                self.send_response(200)
+            elif self.path == "/page3":
+                body = b'<html>deep</html>'
+                self.send_response(200)
+            else:
+                body = b'{}'
+                self.send_response(404)
+            self.send_header("Content-Type", "text/html" if body.startswith(b"<") else "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-        def do_GET(self):
-            self._respond(200 if self.path == "/api/identity/2" else 404)
-
         def do_POST(self):
-            self._respond(404)
+            if self.path == "/api/login":
+                length = int(self.headers.get("Content-Length", 0))
+                creds = self.rfile.read(length).decode()
+                user = json.loads(creds).get("user", "")
+                body = json.dumps({"token": f"tok-{user}-123", "user": user}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Set-Cookie", f"sid={user}-session; HttpOnly")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
         def log_message(self, *a):
             pass
@@ -127,6 +156,110 @@ def test_engine_scans_and_probes_local_server(scope_file, tmp_path, monkeypatch)
         req = engine.http_probe("127.0.0.1", port=port, path="/x",
                                 method="POST", headers={"X-A": "1"}, body="y=1")
         assert req["status"] == 404 and "X-A: 1" in req["request"]
+    finally:
+        srv.shutdown()
+    scope.CURRENT["scope"] = None
+
+
+def test_stateful_flow_login_replay_bola(scope_file, tmp_path, monkeypatch):
+    """The core demo flow: two identities -> replay diff -> BOLA verdict."""
+    import http.server
+    import threading
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    scope.CURRENT["scope"] = scope.load_scope(scope_file)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            creds = json.loads(self.rfile.read(length).decode())
+            user = creds.get("user", "")
+            body = json.dumps({"token": f"tok-{user}-123", "user": user}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", f"sid={user}-session; HttpOnly")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            # BOLA: whoever asks for /api/identity/<id> gets the data, no check
+            owner = {"/api/identity/1": "alice@example.com", "/api/identity/2": "victim@example.com"}
+            body = json.dumps({"email": owner.get(self.path, "x@x.com")}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        login_a = engine.login("127.0.0.1", port=port, path="/api/login",
+                               body='{"user":"alice","password":"pw"}', identity="userA")
+        login_b = engine.login("127.0.0.1", port=port, path="/api/login",
+                               body='{"user":"bob","password":"pw"}', identity="userB")
+        assert login_a.get("ok") and login_b.get("ok"), (login_a, login_b)
+
+        # BOLA: bob's session reads alice's data -> identical responses -> verdict
+        r = engine.replay("127.0.0.1", port=port, path="/api/identity/1")
+        assert "verdict" in r and "ACCESS-CONTROL FAILURE" in r["verdict"], r
+        assert r["results"]["userA"]["body_sha1"] == r["results"]["userB"]["body_sha1"]
+        f = store.add_finding("BOLA: any authenticated user reads /api/identity/<id>",
+                              "high", "verified", evidence=r["verdict"] +
+                              f" | userA sha={r['results']['userA']['body_sha1']}, userB sha={r['results']['userB']['body_sha1']}",
+                              source=f"leash_replay GET /api/identity/1 as userA+userB")
+        assert f.get("ok")
+
+        # tokens really stayed out of the model's reach: identity store holds them
+        idents = json.load(open(engine._identities_path(), encoding="utf-8"))
+        assert idents[f"127.0.0.1:{port}"]["userA"]["bearer"] == "tok-alice-123"
+    finally:
+        srv.shutdown()
+    scope.CURRENT["scope"] = None
+
+
+def test_crawl_inventory(scope_file, tmp_path, monkeypatch):
+    import http.server
+    import threading
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    scope.CURRENT["scope"] = scope.load_scope(scope_file)
+
+    pages = {
+        "/": '<html><a href="/page2">p2</a><a href="https://evil.example.com/x">bad</a>'
+             '<form action="/login"><input type="text" name="user"></form></html>',
+        "/page2": '<html><a href="/page3">p3</a></html>',
+        "/page3": '<html>deep</html>',
+    }
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in pages:
+                body = pages[self.path].encode()
+                self.send_response(200)
+            else:
+                body = b"{}"
+                self.send_response(404)
+            self.send_header("Content-Type", "text/html" if self.path in pages else "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        out = engine.crawl("127.0.0.1", port=port)
+        assert out["pages"] == 3 and out["endpoints"] == ["/", "/page2", "/page3"], out
+        assert out["forms"] and out["forms"][0]["inputs"] == ["text:user"]
+        assert os.path.isfile(out["inventory"])
     finally:
         srv.shutdown()
     scope.CURRENT["scope"] = None

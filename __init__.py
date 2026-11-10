@@ -249,6 +249,105 @@ LEASH_REQUEST_SCHEMA = {
 }
 
 
+# --- stateful testing tools ------------------------------------------------
+
+def _tool_leash_login(args, **kwargs):
+    out = _engine.login(
+        host=args.get("host", ""), port=args.get("port", 80),
+        tls=bool(args.get("tls")), method=args.get("method", "POST"),
+        path=args.get("path", "/login"), headers=args.get("headers"),
+        body=args.get("body", ""), identity=args.get("identity", "user"),
+        token_field=args.get("token_field", "token"),
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _tool_leash_replay(args, **kwargs):
+    out = _engine.replay(
+        host=args.get("host", ""), port=args.get("port", 80),
+        tls=bool(args.get("tls")), method=args.get("method", "GET"),
+        path=args.get("path", "/"), headers=args.get("headers"),
+        identities=args.get("identities"), bodies=args.get("bodies"),
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _tool_leash_crawl(args, **kwargs):
+    out = _engine.crawl(
+        host=args.get("host", ""), port=args.get("port", 80),
+        tls=bool(args.get("tls")), start=args.get("start", "/"),
+        max_pages=args.get("max_pages", 30),
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+LEASH_LOGIN_SCHEMA = {
+    "name": "leash_login",
+    "description": (
+        "Authenticate one identity (user, admin, victim...) against an in-scope "
+        "host and store its session (cookies/bearer) INSIDE the plugin. The "
+        "token never enters the model context — replay uses it without exposing "
+        "it. Run once per identity before leash_replay."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string"}, "port": {"type": "integer"},
+            "tls": {"type": "boolean"}, "method": {"type": "string"},
+            "path": {"type": "string", "description": "Login endpoint, e.g. /api/login"},
+            "headers": {"type": "object"},
+            "body": {"type": "string", "description": "Login body, e.g. {\"user\":\"a\",\"password\":\"...\"}"},
+            "identity": {"type": "string", "description": "Name for this identity, e.g. 'userA'"},
+            "token_field": {"type": "string", "description": "JSON response field holding the token (default 'token')"},
+        },
+        "required": ["host", "identity"],
+    },
+}
+
+LEASH_REPLAY_SCHEMA = {
+    "name": "leash_replay",
+    "description": (
+        "Replay the same request as 2+ stored identities (optionally different "
+        "bodies) and diff status/size/hash/timing. Byte-identical responses for "
+        "different identities are flagged as an access-control failure "
+        "candidate — the classic IDOR/BOLA proof. This differential verdict "
+        "makes a finding 'verified' material."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string"}, "port": {"type": "integer"},
+            "tls": {"type": "boolean"}, "method": {"type": "string"},
+            "path": {"type": "string", "description": "Target endpoint, e.g. /api/identity/2"},
+            "headers": {"type": "object", "description": "Extra headers applied to every identity's request"},
+            "identities": {"type": "array", "items": {"type": "string"},
+                           "description": "Identity names (default: all stored)"},
+            "bodies": {"type": "object", "description": "Per-identity body, e.g. {\"userA\":\"uid=1\",\"userB\":\"uid=2\"}"},
+        },
+        "required": ["host"],
+    },
+}
+
+LEASH_CRAWL_SCHEMA = {
+    "name": "leash_crawl",
+    "description": (
+        "Same-origin BFS crawl of an in-scope app: maps reachable endpoints and "
+        "forms into a persisted inventory (survives across sessions) so "
+        "findings can reference concrete endpoints. Same-origin only; the "
+        "scope gate applies to every fetched page."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string"}, "port": {"type": "integer"},
+            "tls": {"type": "boolean"}, "start": {"type": "string"},
+            "max_pages": {"type": "integer", "description": "Cap (default 30)"},
+        },
+        "required": ["host"],
+    },
+}
+
+
 def register(ctx) -> None:
     _reload(ctx)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
@@ -263,3 +362,9 @@ def register(ctx) -> None:
                       schema=LEASH_SCAN_SCHEMA, handler=_tool_leash_scan)
     ctx.register_tool(name="leash_request", toolset="leash",
                       schema=LEASH_REQUEST_SCHEMA, handler=_tool_leash_request)
+    ctx.register_tool(name="leash_login", toolset="leash",
+                      schema=LEASH_LOGIN_SCHEMA, handler=_tool_leash_login)
+    ctx.register_tool(name="leash_replay", toolset="leash",
+                      schema=LEASH_REPLAY_SCHEMA, handler=_tool_leash_replay)
+    ctx.register_tool(name="leash_crawl", toolset="leash",
+                      schema=LEASH_CRAWL_SCHEMA, handler=_tool_leash_crawl)

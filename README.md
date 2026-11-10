@@ -11,15 +11,25 @@ finding.
 ## What it does
 
 leash is a **pentest toolkit**: it gives the agent the primitives to actually
-run an authorized security test — recon, probing, findings, report — with a
-hard scope gate around every network action.
+run an authorized security test — recon, session-aware access-control
+testing, findings, report — with a hard scope gate around every network
+action. The primitives hold state between calls, which is what a prompt or a
+skill cannot do.
 
 - **Engine tools**:
   - `leash_scan` — TCP port scan of an in-scope host (common-services list or
     custom ports).
-  - `leash_request` — one raw HTTP(S) request (method, path, headers, body)
-    against an in-scope host; the probing primitive for IDOR, auth bypass,
-    injection and friends. Every request lands in the evidence ledger.
+  - `leash_crawl` — same-origin BFS crawl; maps endpoints and forms into a
+    persisted inventory that survives across sessions.
+  - `leash_login` — authenticate an *identity* (user/admin/victim) and keep
+    its cookies/bearer inside the plugin. The token never enters the model
+    context, so it cannot leak into logs, transcripts or other tools' output.
+  - `leash_replay` — replay the same request as 2+ stored identities and diff
+    status/size/hash/timing. Byte-identical responses for different
+    identities are flagged as an access-control failure (BOLA/IDOR) — the
+    differential proof, computed by the plugin, not the model.
+  - `leash_request` — one raw HTTP(S) request for anything the higher-level
+    tools don't cover.
 - **Scope gate** (`pre_tool_call` + inside every engine tool): arguments of
   monitored tools (`terminal`, `web_extract`, `browser_*`) are scanned for
   network targets; the engine tools additionally re-check the scope on every
@@ -61,6 +71,9 @@ literal.
 ## Tools
 
 - `leash_scan` — TCP recon of an in-scope host
+- `leash_crawl` — same-origin crawl → persisted endpoint/form inventory
+- `leash_login` — store an identity's session inside the plugin (out of context)
+- `leash_replay` — multi-identity replay with differential BOLA/IDOR verdict
 - `leash_request` — raw HTTP(S) probe of an in-scope host, logged to the ledger
 - `leash_scope` — show scope, mode and ledger stats
 - `leash_finding` — record a finding (`hypothesis` | `verified` + evidence)
@@ -68,6 +81,9 @@ literal.
 
 ## Disclosure
 
+- The engine's `leash_login` stores session tokens locally at
+  `$HERMES_HOME/plugin-data/leash/identities.json` (plaintext, same trust
+  boundary as the profile's own config). They never enter the model context.
 - `pre_tool_call` sees the arguments of monitored tools; arguments may contain
   user content or secrets. Excerpts (first 600 chars) are stored **locally**
   under `$HERMES_HOME/plugin-data/leash/` and are never sent anywhere.

@@ -11,6 +11,9 @@ provides_tools:
   - leash_report
   - leash_scan
   - leash_request
+  - leash_login
+  - leash_replay
+  - leash_crawl
 provides_hooks:
   - pre_tool_call
   - post_tool_call

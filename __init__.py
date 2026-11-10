@@ -11,9 +11,11 @@ import json
 try:
     from . import leash_scope as _scope
     from . import leash_store as _store
+    from . import leash_engine as _engine
 except ImportError:  # namespaced/flat load
     import leash_scope as _scope
     import leash_store as _store
+    import leash_engine as _engine
 
 DEFAULT_MONITORED = {"terminal", "web_extract"}
 MAX_ARG_TEXT = 8000
@@ -48,6 +50,7 @@ def _reload(ctx) -> None:
     except _scope.ScopeError as exc:
         _state["scope"] = None
         _state["scope_error"] = str(exc)
+    _scope.CURRENT["scope"] = _state["scope"]
 
 
 def _is_monitored(tool_name: str) -> bool:
@@ -187,6 +190,65 @@ LEASH_REPORT_SCHEMA = {
 }
 
 
+# --- engine tools ----------------------------------------------------------
+
+def _tool_leash_scan(args, **kwargs):
+    out = _engine.tcp_scan(args.get("host", ""), args.get("ports"))
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _tool_leash_request(args, **kwargs):
+    out = _engine.http_probe(
+        host=args.get("host", ""), port=args.get("port", 80),
+        tls=bool(args.get("tls")), method=args.get("method", "GET"),
+        path=args.get("path", "/"), headers=args.get("headers"),
+        body=args.get("body", ""),
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+LEASH_SCAN_SCHEMA = {
+    "name": "leash_scan",
+    "description": (
+        "TCP port scan of an in-scope host (recon). Refused if the host (or any "
+        "address it resolves to) is outside the authorized scope file. Returns "
+        "open ports from the common list or a custom port list."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string", "description": "In-scope host to scan"},
+            "ports": {"type": "array", "items": {"type": "integer"},
+                      "description": "Optional port list; defaults to a common-services list"},
+        },
+        "required": ["host"],
+    },
+}
+
+LEASH_REQUEST_SCHEMA = {
+    "name": "leash_request",
+    "description": (
+        "Send one raw HTTP(S) request to an in-scope host and return status, "
+        "headers and body — the probing primitive for testing vulnerabilities "
+        "(IDOR, auth bypass, injection). Refused if the host is outside the "
+        "authorized scope file. Every request is logged to the evidence ledger."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string", "description": "In-scope host"},
+            "port": {"type": "integer", "description": "Port (default 80)"},
+            "tls": {"type": "boolean", "description": "Use HTTPS (default false)"},
+            "method": {"type": "string", "description": "HTTP method (default GET)"},
+            "path": {"type": "string", "description": "Request path (default /)"},
+            "headers": {"type": "object", "description": "Request headers, e.g. {\"Authorization\": \"Bearer ...\"}"},
+            "body": {"type": "string", "description": "Request body"},
+        },
+        "required": ["host"],
+    },
+}
+
+
 def register(ctx) -> None:
     _reload(ctx)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
@@ -197,3 +259,7 @@ def register(ctx) -> None:
                       schema=LEASH_FINDING_SCHEMA, handler=_tool_leash_finding)
     ctx.register_tool(name="leash_report", toolset="leash",
                       schema=LEASH_REPORT_SCHEMA, handler=_tool_leash_report)
+    ctx.register_tool(name="leash_scan", toolset="leash",
+                      schema=LEASH_SCAN_SCHEMA, handler=_tool_leash_scan)
+    ctx.register_tool(name="leash_request", toolset="leash",
+                      schema=LEASH_REQUEST_SCHEMA, handler=_tool_leash_request)

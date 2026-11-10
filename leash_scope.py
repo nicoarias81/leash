@@ -35,6 +35,10 @@ class ScopeError(Exception):
     pass
 
 
+# the active scope, set by the plugin's register/_reload; engine reads this
+CURRENT = {"scope": None}
+
+
 def normalize_host(host: str) -> str:
     host = (host or "").strip().lower()
     if host.startswith("[") and host.endswith("]"):

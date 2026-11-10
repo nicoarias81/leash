@@ -18,6 +18,7 @@ def _load(name):
 
 scope = _load("leash_scope")
 store = _load("leash_store")
+engine = _load("leash_engine")
 
 
 @pytest.fixture()
@@ -76,3 +77,56 @@ def test_verified_finding_requires_evidence(tmp_path, monkeypatch):
     assert out.get("ok")
     st = store.stats()
     assert st["findings"] == 1
+
+
+def test_engine_blocks_out_of_scope(scope_file, tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    s = scope.load_scope(scope_file)
+    scope.CURRENT["scope"] = s
+    out = engine.tcp_scan("api.evil.com")
+    assert out["blocked"] and "outside authorized scope" in out["reason"]
+    out = engine.http_probe("api.evil.com")
+    assert out["blocked"]
+    scope.CURRENT["scope"] = None
+    out = engine.http_probe("127.0.0.1")
+    assert out["blocked"] and "no usable scope" in out["reason"]
+
+
+def test_engine_scans_and_probes_local_server(scope_file, tmp_path, monkeypatch):
+    import http.server
+    import threading
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    scope.CURRENT["scope"] = scope.load_scope(scope_file)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def _respond(self, status):
+            body = b'{"user": 2, "email": "victim@example.com"}'
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._respond(200 if self.path == "/api/identity/2" else 404)
+
+        def do_POST(self):
+            self._respond(404)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        scan = engine.tcp_scan("127.0.0.1", ports=[port])
+        assert not scan.get("blocked") and port in scan["open"]
+        probe = engine.http_probe("127.0.0.1", port=port, path="/api/identity/2")
+        assert probe["status"] == 200 and "victim@example.com" in probe["body"]
+        req = engine.http_probe("127.0.0.1", port=port, path="/x",
+                                method="POST", headers={"X-A": "1"}, body="y=1")
+        assert req["status"] == 404 and "X-A: 1" in req["request"]
+    finally:
+        srv.shutdown()
+    scope.CURRENT["scope"] = None

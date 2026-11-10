@@ -10,12 +10,22 @@ finding.
 
 ## What it does
 
-- **Scope gate** (`pre_tool_call`): monitored tools (`terminal`, `web_extract`,
-  `browser_*`) have their arguments scanned for network targets — URLs, host
-  names, IPv4s. In `enforce` mode, a call that touches anything outside the
-  scope file is **blocked** before it runs, with a message telling the agent
-  why. In `audit` mode the attempt is only recorded. With no usable scope
-  file, enforce mode fails closed (blocks every network-capable call).
+leash is a **pentest toolkit**: it gives the agent the primitives to actually
+run an authorized security test — recon, probing, findings, report — with a
+hard scope gate around every network action.
+
+- **Engine tools**:
+  - `leash_scan` — TCP port scan of an in-scope host (common-services list or
+    custom ports).
+  - `leash_request` — one raw HTTP(S) request (method, path, headers, body)
+    against an in-scope host; the probing primitive for IDOR, auth bypass,
+    injection and friends. Every request lands in the evidence ledger.
+- **Scope gate** (`pre_tool_call` + inside every engine tool): arguments of
+  monitored tools (`terminal`, `web_extract`, `browser_*`) are scanned for
+  network targets; the engine tools additionally re-check the scope on every
+  call, resolving hostnames so an approved name can't hide an out-of-scope IP.
+  In `enforce` mode anything outside the scope file is **blocked** before it
+  runs. With no usable scope file, the engine fails closed.
 - **Evidence ledger** (`post_tool_call`): every monitored call is appended to a
   local JSONL ledger — what ran, on what, with what status.
 - **Findings**: `leash_finding` records a finding; status `verified` is
@@ -50,6 +60,8 @@ literal.
 
 ## Tools
 
+- `leash_scan` — TCP recon of an in-scope host
+- `leash_request` — raw HTTP(S) probe of an in-scope host, logged to the ledger
 - `leash_scope` — show scope, mode and ledger stats
 - `leash_finding` — record a finding (`hypothesis` | `verified` + evidence)
 - `leash_report` — write the markdown report

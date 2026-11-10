@@ -112,9 +112,23 @@ agent: scope loaded (localhost, 192.168.10.0/24) — enforce mode
 
 ## Install
 
+Once listed in the plugin catalog:
+
 ```sh
-hermes plugins install nicoarias81/leash --enable
+hermes plugins install leash --enable
 ```
+
+Or straight from the repo:
+
+```sh
+hermes plugins install https://github.com/nicoarias81/leash --enable
+```
+
+## Screenshots
+
+![Toolbox](screenshots/toolbox.png)
+![Replay / BOLA canary detection](screenshots/replay-bola.png)
+![Report](screenshots/report.png)
 
 ## Development
 
